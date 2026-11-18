@@ -1,0 +1,4 @@
+# Compiled binary and object files
+msh
+*.o
+msh_asan
