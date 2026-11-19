@@ -4,6 +4,7 @@
 // Task 3: run external commands with fork, execvp and waitpid
 // Task 4: built-in commands cd, help and exit
 // Task 5: show the exit status of the last command in the prompt
+// Task 6: background jobs with & and reaping finished children
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -42,8 +43,32 @@ static int parse_line(char *line, char **argv)
     return argc;
 }
 
+// check if the command ends with & and remove the & from argv
+// returns 1 for a background command and 0 for a normal one (argc must be at least 1)
+static int strip_background(char **argv, int *argc)
+{
+    char  *last = argv[*argc - 1];
+    size_t len  = strlen(last);
+
+    // the last word does not end with &, so it is a normal command
+    if (last[len - 1] != '&') {
+        return 0;
+    }
+
+    if (len == 1) {
+        // the word is just "&" (like: sleep 3 &), so drop the whole word
+        (*argc)--;
+        argv[*argc] = NULL;
+    } else {
+        // the & is stuck to the word (like: sleep 3&), so cut only the &
+        last[len - 1] = '\0';
+    }
+
+    return 1;
+}
+
 // change the shell's own directory (this is why cd must be a built-in)
-// NEW: returns 0 on success and 1 on failure
+// returns 0 on success and 1 on failure
 static int builtin_cd(char **argv, int argc)
 {
     const char *dir;
@@ -84,12 +109,13 @@ static void builtin_help(void)
     printf("  help       show this message\n");
     printf("  exit       leave the shell\n");
     printf("Any other command is run as an external program.\n");
+    printf("Add & at the end of a command to run it in the background.\n");
     printf("The prompt shows the exit status of the last command.\n");
 }
 
 // run cd or help if that is what the user typed
 // returns 1 if it was a built-in, 0 if it was not (exit is handled in main)
-// NEW: it also stores the built-in's exit status in *status
+// it also stores the built-in's exit status in *status
 static int try_builtin(char **argv, int argc, int *status)
 {
     if (strcmp(argv[0], "cd") == 0) {
@@ -104,7 +130,7 @@ static int try_builtin(char **argv, int argc, int *status)
     return 0;
 }
 
-// NEW: turn the packed status from waitpid into a normal exit status number
+// turn the packed status from waitpid into a normal exit status number
 static int decode_status(int status)
 {
     if (WIFEXITED(status)) {
@@ -119,9 +145,23 @@ static int decode_status(int status)
     return 1;
 }
 
-// run argv as an external program and wait for it to finish
-// NEW: returns the exit status of the command
-static int run_command(char **argv)
+// collect every finished child without waiting, so no zombies are left
+static void reap_children(void)
+{
+    int   status;
+    pid_t pid;
+
+    // WNOHANG makes waitpid return right away if no child has finished yet
+    // it returns a pid for each finished child, then 0 or -1 when we are done
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        printf("[done] pid %d finished with status %d\n",
+               (int)pid, decode_status(status));
+    }
+}
+
+// run argv as an external program
+// if background is 1 we do not wait, otherwise we wait and return its exit status
+static int run_command(char **argv, int background)
 {
     int   status;
     pid_t pid;
@@ -149,6 +189,12 @@ static int run_command(char **argv)
         _exit(127);
     }
 
+    // background job, so show the pid and return at once without waiting
+    if (background) {
+        printf("[bg] started pid %d\n", (int)pid);
+        return 0;
+    }
+
     // parent: wait for the child, and retry if a signal interrupts the wait
     while (waitpid(pid, &status, 0) == -1) {
         if (errno != EINTR) {
@@ -157,7 +203,7 @@ static int run_command(char **argv)
         }
     }
 
-    // NEW: convert the raw status into the number we show in the prompt
+    // convert the raw status into the number we show in the prompt
     return decode_status(status);
 }
 
@@ -168,10 +214,13 @@ int main(void)
     ssize_t nread;
     char   *argv[MAX_ARGS];
     int     argc;
-    int     last_status = 0;   // NEW: exit status of the previous command
+    int     last_status = 0;   // exit status of the previous command
+    int     background;        // 1 if the command ended with &
 
     while (1) {
-        // NEW: show the last status inside the prompt
+        // reap finished background jobs before showing the prompt
+        reap_children();
+
         printf("msh[%d]> ", last_status);
         fflush(stdout);
 
@@ -186,6 +235,9 @@ int main(void)
             break;
         }
 
+        // reap again, so a job that finished while we waited is not a zombie
+        reap_children();
+
         // remove the newline that getline keeps
         if (nread > 0 && line[nread - 1] == '\n') {
             line[nread - 1] = '\0';
@@ -193,7 +245,7 @@ int main(void)
 
         argc = parse_line(line, argv);
 
-        // NEW: too many arguments counts as a failure
+        // too many arguments counts as a failure
         if (argc < 0) {
             last_status = 1;
             continue;
@@ -201,6 +253,16 @@ int main(void)
 
         // blank line, so show a new prompt and keep the old status
         if (argc == 0) {
+            continue;
+        }
+
+        // check for a trailing & and remove it from argv
+        background = strip_background(argv, &argc);
+
+        // a line with only & has no command to run
+        if (argc == 0) {
+            fprintf(stderr, "msh: syntax error: no command before &\n");
+            last_status = 1;
             continue;
         }
 
@@ -214,8 +276,8 @@ int main(void)
             continue;
         }
 
-        // not a built-in, so run it and remember how it ended
-        last_status = run_command(argv);
+        // not a built-in, so run it (in the background if there was an &)
+        last_status = run_command(argv, background);
     }
 
     free(line);
