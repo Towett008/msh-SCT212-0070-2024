@@ -6,6 +6,7 @@
 // Task 5: show the exit status of the last command in the prompt
 // Task 6: background jobs with & and reaping finished children
 // Task 7: output redirection with > (done in the child only)
+// Task 8: Ctrl-C stops the foreground command but not the shell
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -14,12 +15,36 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>       // open and the O_ flags
+#include <signal.h>      // sigaction, signal, SIGINT
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 
 #define MAX_ARGS 64      // argv holds up to 63 words plus the NULL
 #define DELIMS   " \t"   // words are separated by spaces or tabs
+
+// runs when Ctrl-C is pressed, it only prints a newline so the prompt starts on a new line
+// write is safe to use inside a signal handler, printf is not
+static void handle_sigint(int sig)
+{
+    (void)sig;   // not used, this stops the unused parameter warning
+    write(STDOUT_FILENO, "\n", 1);
+}
+
+// make the shell survive Ctrl-C by installing our own SIGINT handler
+static void setup_signals(void)
+{
+    struct sigaction sa;
+
+    sa.sa_handler = handle_sigint;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;   // no SA_RESTART, so getline stops with EINTR when Ctrl-C is pressed
+
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("msh: sigaction");
+        exit(1);
+    }
+}
 
 // split line into words and store them in argv (changes line in place)
 // returns the word count, 0 for a blank line, or -1 if there are too many words
@@ -169,6 +194,7 @@ static void builtin_help(void)
     printf("Any other command is run as an external program.\n");
     printf("Add & at the end of a command to run it in the background.\n");
     printf("Use > file to send a command's output to a file.\n");
+    printf("Ctrl-C stops the running command, Ctrl-D leaves the shell.\n");
     printf("The prompt shows the exit status of the last command.\n");
 }
 
@@ -198,6 +224,7 @@ static int decode_status(int status)
     }
     if (WIFSIGNALED(status)) {
         // the child was killed by a signal, so use 128 + the signal number
+        // for Ctrl-C this is 128 + 2 = 130
         return 128 + WTERMSIG(status);
     }
     // should not happen here, but return failure just in case
@@ -238,7 +265,15 @@ static int run_command(char **argv, int background, const char *outfile)
     }
 
     if (pid == 0) {
-        // child: set up the redirection first, the shell itself is never touched
+        // child: put Ctrl-C back to its normal action so it can stop this command
+        signal(SIGINT, SIG_DFL);
+
+        // a background job gets its own process group so Ctrl-C at the prompt does not kill it
+        if (background) {
+            setpgid(0, 0);
+        }
+
+        // set up the redirection, the shell itself is never touched
         if (outfile != NULL) {
             // create the file or empty it, with permissions 0644
             int fd = open(outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -276,6 +311,7 @@ static int run_command(char **argv, int background, const char *outfile)
     }
 
     // parent: wait for the child, and retry if a signal interrupts the wait
+    // Ctrl-C makes waitpid fail with EINTR in the shell, so we just wait again
     while (waitpid(pid, &status, 0) == -1) {
         if (errno != EINTR) {
             perror("msh: waitpid");
@@ -298,6 +334,9 @@ int main(void)
     int     background;        // 1 if the command ended with &
     char   *outfile;           // file name after >, or NULL if there is none
 
+    // make the shell ignore the normal action of Ctrl-C
+    setup_signals();
+
     while (1) {
         // reap finished background jobs before showing the prompt
         reap_children();
@@ -305,9 +344,17 @@ int main(void)
         printf("msh[%d]> ", last_status);
         fflush(stdout);
 
+        // clear errno first, so an old EINTR is not mistaken for a new one
+        errno = 0;
         nread = getline(&line, &cap, stdin);
 
         if (nread == -1) {
+            // Ctrl-C at the prompt interrupted getline, so clear the error and show a new prompt
+            if (errno == EINTR) {
+                clearerr(stdin);
+                continue;
+            }
+
             if (feof(stdin)) {
                 printf("\n");   // Ctrl-D, so move to a fresh line
             } else {
