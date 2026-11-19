@@ -5,6 +5,7 @@
 // Task 4: built-in commands cd, help and exit
 // Task 5: show the exit status of the last command in the prompt
 // Task 6: background jobs with & and reaping finished children
+// Task 7: output redirection with > (done in the child only)
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -12,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>       // open and the O_ flags
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -67,6 +69,62 @@ static int strip_background(char **argv, int *argc)
     return 1;
 }
 
+// look for > in argv, save the file name after it and remove both from argv
+// *outfile is NULL when there is no redirection
+// returns 0 if everything is fine and -1 on a syntax error
+static int find_redirect(char **argv, int *argc, char **outfile)
+{
+    *outfile = NULL;
+
+    for (int i = 0; i < *argc; i++) {
+        char *name;
+        int   used;   // how many words the redirection uses: 1 for >file, 2 for > file
+
+        // only words that start with > are redirections
+        if (argv[i][0] != '>') {
+            continue;
+        }
+
+        // we only support one > on a line
+        if (*outfile != NULL) {
+            fprintf(stderr, "msh: syntax error: only one > is allowed\n");
+            return -1;
+        }
+
+        if (argv[i][1] != '\0') {
+            // the file name is stuck to the > (like: >f.txt)
+            name = argv[i] + 1;
+            used = 1;
+        } else if (i + 1 < *argc) {
+            // the file name is the next word (like: > f.txt)
+            name = argv[i + 1];
+            used = 2;
+        } else {
+            fprintf(stderr, "msh: syntax error: expected a file name after >\n");
+            return -1;
+        }
+
+        // a file name starting with > means >> or > >, which we do not support
+        if (name[0] == '>') {
+            fprintf(stderr, "msh: syntax error: unexpected > (append is not supported)\n");
+            return -1;
+        }
+
+        *outfile = name;
+
+        // remove the redirection words by moving the rest of argv down (NULL included)
+        for (int j = i; j + used <= *argc; j++) {
+            argv[j] = argv[j + used];
+        }
+        *argc -= used;
+
+        // look at this position again because new words moved into it
+        i--;
+    }
+
+    return 0;
+}
+
 // change the shell's own directory (this is why cd must be a built-in)
 // returns 0 on success and 1 on failure
 static int builtin_cd(char **argv, int argc)
@@ -110,6 +168,7 @@ static void builtin_help(void)
     printf("  exit       leave the shell\n");
     printf("Any other command is run as an external program.\n");
     printf("Add & at the end of a command to run it in the background.\n");
+    printf("Use > file to send a command's output to a file.\n");
     printf("The prompt shows the exit status of the last command.\n");
 }
 
@@ -161,7 +220,8 @@ static void reap_children(void)
 
 // run argv as an external program
 // if background is 1 we do not wait, otherwise we wait and return its exit status
-static int run_command(char **argv, int background)
+// if outfile is not NULL the child's output goes into that file
+static int run_command(char **argv, int background, const char *outfile)
 {
     int   status;
     pid_t pid;
@@ -178,7 +238,27 @@ static int run_command(char **argv, int background)
     }
 
     if (pid == 0) {
-        // child: replace this process with the command (searches $PATH)
+        // child: set up the redirection first, the shell itself is never touched
+        if (outfile != NULL) {
+            // create the file or empty it, with permissions 0644
+            int fd = open(outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd == -1) {
+                fprintf(stderr, "msh: %s: ", outfile);
+                perror("");
+                _exit(1);
+            }
+
+            // make fd 1 (stdout) point to the file instead of the terminal
+            if (dup2(fd, STDOUT_FILENO) == -1) {
+                perror("msh: dup2");
+                _exit(1);
+            }
+
+            // fd 1 now points to the file, so the extra descriptor is not needed
+            close(fd);
+        }
+
+        // replace this process with the command (searches $PATH)
         execvp(argv[0], argv);
 
         // execvp only returns if it failed
@@ -216,6 +296,7 @@ int main(void)
     int     argc;
     int     last_status = 0;   // exit status of the previous command
     int     background;        // 1 if the command ended with &
+    char   *outfile;           // file name after >, or NULL if there is none
 
     while (1) {
         // reap finished background jobs before showing the prompt
@@ -259,9 +340,15 @@ int main(void)
         // check for a trailing & and remove it from argv
         background = strip_background(argv, &argc);
 
-        // a line with only & has no command to run
+        // find a > file redirection and remove it from argv
+        if (find_redirect(argv, &argc, &outfile) == -1) {
+            last_status = 1;
+            continue;
+        }
+
+        // nothing left means there was no command to run (like: & or > f.txt)
         if (argc == 0) {
-            fprintf(stderr, "msh: syntax error: no command before &\n");
+            fprintf(stderr, "msh: syntax error: missing command\n");
             last_status = 1;
             continue;
         }
@@ -271,13 +358,21 @@ int main(void)
             break;
         }
 
+        // built-ins run inside the shell with no child, so they cannot use >
+        if (outfile != NULL &&
+            (strcmp(argv[0], "cd") == 0 || strcmp(argv[0], "help") == 0)) {
+            fprintf(stderr, "msh: %s: redirection is not supported for built-ins\n", argv[0]);
+            last_status = 1;
+            continue;
+        }
+
         // run cd or help inside the shell, with no fork
         if (try_builtin(argv, argc, &last_status)) {
             continue;
         }
 
         // not a built-in, so run it (in the background if there was an &)
-        last_status = run_command(argv, background);
+        last_status = run_command(argv, background, outfile);
     }
 
     free(line);
