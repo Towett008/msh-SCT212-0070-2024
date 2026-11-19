@@ -91,4 +91,4 @@ This can be seen in msh. Run `pwd`, then `sh -c "cd /tmp"`, then `pwd` again. Th
 - ICS 2305  notes 
 
 **AI tool used**
-- **Claude ** was used as a tutor and coding assistant. It guided me through the project one task at a time, suggested and explained the code , it helped me understand the system calls. I built the project in my own repository, compiled and ran it, tested each task, and committed each task separately. 
+- Claude was used as a tutor and coding assistant. It guided me through the project one task at a time, suggested and explained the code , it helped me understand the system calls. I built the project in my own repository, compiled and ran it, tested each task, and committed each task separately. 

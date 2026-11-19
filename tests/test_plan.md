@@ -17,8 +17,12 @@
 | `sleep 3 &` | Prompt returns at once; PID shown | Printed `[bg] started pid 74402` and the prompt `msh[0]>` came back immediately. About 3 seconds later, pressing Enter showed `[done] pid 74402 finished with status 0`. |
 | `echo hi > f.txt` then `cat f.txt` | File contains `hi` |  `cat f.txt` printed `hi` on the screen. |
 | `sleep 100` then Ctrl-C | Sleep stops; shell survives; status 130 | After pressing Ctrl-C, `sleep` stopped and a new prompt appeared as `msh[130]>` |
-| Ctrl-D at the prompt | Shell exits cleanly | A newline was printed and the shell exited, returning to the normal WSL prompt. 
+| Ctrl-D at the prompt | Shell exits cleanly | A newline was printed and the shell exited, returning to the normal WSL prompt. |
 
+## My own tests
+
+| Input | Expected behaviour | Actual result |
+|-------|--------------------|---------------|
 | `false` then `true` | Prompt shows `msh[1]>` after `false`, then `msh[0]>` after `true` | After `false` the prompt was `msh[1]>`. After `true` it was `msh[0]>`. |
 | `cd` (no argument) then `pwd` | Goes to the home directory (`$HOME`) | `cd` printed nothing, and `pwd` printed `/home/administrator`. |
 | `cd /nonexistent` | Error message from `cd`; status 1; shell keeps running | Printed `msh: cd: /nonexistent: No such file or directory`. The prompt became `msh[1]>` and the shell kept running. |

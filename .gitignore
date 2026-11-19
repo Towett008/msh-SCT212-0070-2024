@@ -2,3 +2,6 @@
 msh
 *.o
 msh_asan
+
+f.txt
+out.txt
