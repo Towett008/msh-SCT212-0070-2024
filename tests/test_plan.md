@@ -1,7 +1,7 @@
 ## Test environment
 
 - Operating system: WSL (Ubuntu) on Windows
-- Compiler: FILL IN (run `gcc --version`)
+- Compiler: gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
 - Build command: `make`
 
 
