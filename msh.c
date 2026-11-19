@@ -3,6 +3,7 @@
 // Task 2: split the line into an argv array
 // Task 3: run external commands with fork, execvp and waitpid
 // Task 4: built-in commands cd, help and exit
+// Task 5: show the exit status of the last command in the prompt
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -41,15 +42,16 @@ static int parse_line(char *line, char **argv)
     return argc;
 }
 
-// NEW: change the shell's own directory (this is why cd must be a built-in)
-static void builtin_cd(char **argv, int argc)
+// change the shell's own directory (this is why cd must be a built-in)
+// NEW: returns 0 on success and 1 on failure
+static int builtin_cd(char **argv, int argc)
 {
     const char *dir;
 
     // cd takes at most one argument
     if (argc > 2) {
         fprintf(stderr, "msh: cd: too many arguments\n");
-        return;
+        return 1;
     }
 
     if (argc == 1) {
@@ -57,7 +59,7 @@ static void builtin_cd(char **argv, int argc)
         dir = getenv("HOME");
         if (dir == NULL) {
             fprintf(stderr, "msh: cd: HOME not set\n");
-            return;
+            return 1;
         }
     } else {
         dir = argv[1];
@@ -67,10 +69,13 @@ static void builtin_cd(char **argv, int argc)
     if (chdir(dir) == -1) {
         fprintf(stderr, "msh: cd: %s: ", dir);
         perror("");
+        return 1;
     }
+
+    return 0;
 }
 
-// NEW: print the list of built-in commands
+// print the list of built-in commands
 static void builtin_help(void)
 {
     printf("msh - a minimal shell\n");
@@ -79,25 +84,44 @@ static void builtin_help(void)
     printf("  help       show this message\n");
     printf("  exit       leave the shell\n");
     printf("Any other command is run as an external program.\n");
+    printf("The prompt shows the exit status of the last command.\n");
 }
 
-// NEW: run cd or help if that is what the user typed
+// run cd or help if that is what the user typed
 // returns 1 if it was a built-in, 0 if it was not (exit is handled in main)
-static int try_builtin(char **argv, int argc)
+// NEW: it also stores the built-in's exit status in *status
+static int try_builtin(char **argv, int argc, int *status)
 {
     if (strcmp(argv[0], "cd") == 0) {
-        builtin_cd(argv, argc);
+        *status = builtin_cd(argv, argc);
         return 1;
     }
     if (strcmp(argv[0], "help") == 0) {
         builtin_help();
+        *status = 0;
         return 1;
     }
     return 0;
 }
 
+// NEW: turn the packed status from waitpid into a normal exit status number
+static int decode_status(int status)
+{
+    if (WIFEXITED(status)) {
+        // the child exited normally, so use its own exit code
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        // the child was killed by a signal, so use 128 + the signal number
+        return 128 + WTERMSIG(status);
+    }
+    // should not happen here, but return failure just in case
+    return 1;
+}
+
 // run argv as an external program and wait for it to finish
-static void run_command(char **argv)
+// NEW: returns the exit status of the command
+static int run_command(char **argv)
 {
     int   status;
     pid_t pid;
@@ -110,7 +134,7 @@ static void run_command(char **argv)
     if (pid < 0) {
         // fork failed, so report it and go back to the prompt
         perror("msh: fork");
-        return;
+        return 1;
     }
 
     if (pid == 0) {
@@ -129,9 +153,12 @@ static void run_command(char **argv)
     while (waitpid(pid, &status, 0) == -1) {
         if (errno != EINTR) {
             perror("msh: waitpid");
-            break;
+            return 1;
         }
     }
+
+    // NEW: convert the raw status into the number we show in the prompt
+    return decode_status(status);
 }
 
 int main(void)
@@ -141,9 +168,11 @@ int main(void)
     ssize_t nread;
     char   *argv[MAX_ARGS];
     int     argc;
+    int     last_status = 0;   // NEW: exit status of the previous command
 
     while (1) {
-        printf("msh> ");
+        // NEW: show the last status inside the prompt
+        printf("msh[%d]> ", last_status);
         fflush(stdout);
 
         nread = getline(&line, &cap, stdin);
@@ -164,23 +193,29 @@ int main(void)
 
         argc = parse_line(line, argv);
 
-        // blank line or parse error, so just show a new prompt
-        if (argc <= 0) {
+        // NEW: too many arguments counts as a failure
+        if (argc < 0) {
+            last_status = 1;
             continue;
         }
 
-        // NEW: exit leaves the loop so line gets freed below
+        // blank line, so show a new prompt and keep the old status
+        if (argc == 0) {
+            continue;
+        }
+
+        // exit leaves the loop so line gets freed below
         if (strcmp(argv[0], "exit") == 0) {
             break;
         }
 
-        // NEW: run cd or help inside the shell, with no fork
-        if (try_builtin(argv, argc)) {
+        // run cd or help inside the shell, with no fork
+        if (try_builtin(argv, argc, &last_status)) {
             continue;
         }
 
-        // not a built-in, so run it as an external command
-        run_command(argv);
+        // not a built-in, so run it and remember how it ended
+        last_status = run_command(argv);
     }
 
     free(line);
